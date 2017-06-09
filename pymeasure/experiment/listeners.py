@@ -23,20 +23,47 @@
 #
 
 import logging
+
+from logging import StreamHandler, FileHandler
+from logging.handlers import QueueListener
+
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 try:
     import zmq
-    from msgpack_numpy import loads
+    import cloudpickle
 except ImportError:
-    log.warning("ZMQ and MsgPack are required for TCP communication")
+    log.warning("ZMQ and cloudpickle are required for TCP communication")
 
-from time import sleep
 
-from threading import Thread
-from pymeasure.thread import StoppableThread
-from .results import Results
+class Recorder(QueueListener):
+    """ Recorder loads the initial Results for a filepath and
+        appends data by listening for it over a queue. The queue
+        ensures that no data is lost between the Recorder and Worker.
+    """
+
+    def __init__(self, results, queue, **kwargs):
+        """ Constructs a Recorder to record the Procedure data
+                into the file path, by waiting for data on the subscription
+                port
+                """
+        handlers = []
+        for filename in results.data_filenames:
+            fh = FileHandler(filename=filename, **kwargs)
+            fh.setFormatter(results.format)
+            fh.setLevel(logging.NOTSET)
+            handlers.append(fh)
+
+        QueueListener.__init__(queue, *handlers)
+
+
+class Monitor(QueueListener):
+    def __init__(self, results, queue):
+        console = StreamHandler()
+        console.setFormatter(results.format)
+
+        QueueListener.__init__(self, queue, console)
 
 
 class Listener(StoppableThread):
@@ -46,7 +73,7 @@ class Listener(StoppableThread):
     """
 
     def __init__(self, port, topic='', timeout=0.01):
-        """ Constructs the Listener object with a subscriber port 
+        """ Constructs the Listener object with a subscriber port
         over which to listen for messages
 
         :param port: TCP port to listen on
@@ -69,8 +96,9 @@ class Listener(StoppableThread):
         super(Listener, self).__init__()
 
     def receive(self, flags=0):
-        topic, raw_data = self.subscriber.recv_multipart(flags=flags)
-        return topic.decode(), loads(raw_data, encoding='utf-8')
+        data = self.subscriber.recv_multipart(flags=flags)
+        topic, record = cloudpickle.loads(data)
+        return topic, record
 
     def message_waiting(self):
         return self.poller.poll(self.timeout)
@@ -78,29 +106,3 @@ class Listener(StoppableThread):
     def __repr__(self):
         return "<%s(port=%s,topic=%s,should_stop=%s)>" % (
             self.__class__.__name__, self.port, self.topic, self.should_stop())
-
-
-class Recorder(Thread):
-    """ Recorder loads the initial Results for a filepath and
-    appends data by listening for it over a queue. The queue
-    ensures that no data is lost between the Recorder and Worker.
-    """
-
-    def __init__(self, results, queue):
-        """ Constructs a Recorder to record the Procedure data
-        into the filepath, by waiting for data on the subscription
-        port
-        """
-        self.results = results
-        self.queue = queue
-        super(Recorder, self).__init__()
-
-    def run(self):
-        with open(self.results.data_filename, 'ab', buffering=0) as handle:
-            log.info("Recording to file: %s" % self.results.data_filename)
-            while True:
-                data = self.queue.get()
-                if data is None:
-                    break
-                handle.write(self.results.format(data).encode())
-            log.info("Recorder caught stop command")
