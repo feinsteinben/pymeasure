@@ -23,68 +23,26 @@
 #
 
 import logging
-log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
 
 from .Qt import QtCore
 
+from .thread import StoppableQThread
+from ..experiment.procedure import Procedure
+
+log = logging.getLogger(__name__)
+log.addHandler(logging.NullHandler())
+
 try:
     import zmq
-    from msgpack_numpy import loads
+    from cloudpickle
 except ImportError:
-    log.warning("ZMQ and MsgPack are required for TCP communication")
-
-from time import sleep
-
-from pymeasure.display.thread import StoppableQThread
-from pymeasure.experiment.procedure import Procedure
-
-
-class QListener(StoppableQThread):
-    """Base class for QThreads that need to listen for messages
-    on a ZMQ TCP port and can be stopped by a thread- and process-safe
-    method call
-    """
-
-    def __init__(self, port, topic='', timeout=0.01):
-        """ Constructs the Listener object with a subscriber port 
-        over which to listen for messages
-
-        :param port: TCP port to listen on
-        :param topic: Topic to listen on
-        :param timeout: Timeout in seconds to recheck stop flag
-        """
-        self.port = port
-        self.topic = topic
-        self.context = zmq.Context()
-        log.debug("%s has ZMQ Context: %r" % (self.__class__.__name__, self.context))
-        self.subscriber = self.context.socket(zmq.SUB)
-        self.subscriber.connect('tcp://localhost:%d' % port)
-        self.subscriber.setsockopt(zmq.SUBSCRIBE, topic.encode())
-        log.info("%s connected to '%s' topic on tcp://localhost:%d" % (
-            self.__class__.__name__, topic, port))
-
-        self.poller = zmq.Poller()
-        self.poller.register(self.subscriber, zmq.POLLIN)
-        self.timeout = timeout
-        super(QListener, self).__init__()
-
-    def receive(self, flags=0):
-        topic, raw_data = self.subscriber.recv_multipart(flags=flags)
-        return topic.decode(), loads(raw_data, encoding='utf-8')
-
-    def message_waiting(self):
-        return self.poller.poll(self.timeout)
-
-    def __repr__(self):
-        return "<%s(port=%s,topic=%s,should_stop=%s)>" % (
-            self.__class__.__name__, self.port, self.topic, self.should_stop())
+    log.warning("ZMQ and cloudpickle are required for TCP communication")
 
 
 class Monitor(QtCore.QThread):
     """ Monitor listens for status and progress messages
     from a Worker through a queue to ensure no messages
-    are lost
+    are losts
     """
 
     status = QtCore.QSignal(int)
@@ -92,12 +50,12 @@ class Monitor(QtCore.QThread):
     log = QtCore.QSignal(object)
     worker_running = QtCore.QSignal()
     worker_failed = QtCore.QSignal()
-    worker_finished = QtCore.QSignal() # Distinguished from QThread.finished
+    worker_finished = QtCore.QSignal()  # Distinguished from QThread.finished
     worker_abort_returned = QtCore.QSignal()
 
     def __init__(self, queue):
+        QtCore.QThread.__init__(self)
         self.queue = queue
-        super(Monitor, self).__init__()
 
     def run(self):
         while True:
@@ -123,6 +81,44 @@ class Monitor(QtCore.QThread):
         log.info("Monitor caught stop command")
 
 
+class QListener(StoppableQThread):
+    """Base class for QThreads that need to listen for messages
+    on a ZMQ TCP port and can be stopped by a thread- and process-safe
+    method call
+    """
 
+    def __init__(self, port, topic='', timeout=0.01):
+        """ Constructs the Listener object with a subscriber port
+        over which to listen for messages
 
+        :param port: TCP port to listen on
+        :param topic: Topic to listen on
+        :param timeout: Timeout in seconds to recheck stop flag
+        """
+        StoppableQThread.__init__(self)
 
+        self.port = port
+        self.topic = topic
+        self.context = zmq.Context()
+        log.debug("%s has ZMQ Context: %r" % (self.__class__.__name__, self.context))
+        self.subscriber = self.context.socket(zmq.SUB)
+        self.subscriber.connect('tcp://localhost:%d' % port)
+        self.subscriber.setsockopt(zmq.SUBSCRIBE, topic.encode())
+        log.info("%s connected to '%s' topic on tcp://localhost:%d" % (
+            self.__class__.__name__, topic, port))
+
+        self.poller = zmq.Poller()
+        self.poller.register(self.subscriber, zmq.POLLIN)
+        self.timeout = timeout
+
+    def receive(self, flags=0):
+        data = self.subscriber.recv_multipart(flags=flags)
+        topic, record = cloudpickle.loads(data)
+        return topic, record
+
+    def message_waiting(self):
+        return self.poller.poll(self.timeout)
+
+    def __repr__(self):
+        return "<%s(port=%s,topic=%s,should_stop=%s)>" % (
+            self.__class__.__name__, self.port, self.topic, self.should_stop())
